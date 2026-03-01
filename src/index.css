@@ -3,19 +3,41 @@
 
 @theme {
   --font-sans: "Cairo", ui-sans-serif, system-ui, sans-serif;
+
+  --color-slate-50: #f8fafc;
+  --color-slate-100: #f1f5f9;
+  --color-slate-800: #1e293b;
+  --color-indigo-600: #4f46e5;
+  --color-emerald-600: #059669;
+  --color-rose-600: #e11d48;
 }
 
 @layer base {
-  html {
+  html, body {
     direction: rtl;
+    background-color: #f8fafc !important;
+    color: #0f172a !important;
+    font-family: "Cairo", sans-serif !important;
+    color-scheme: light !important;
   }
-  
-  body {
-    @apply bg-slate-50 text-slate-900 font-sans;
+
+  /* الحل الجذري: إيقاف محرك الألوان الحديث تماماً داخل وضع التصدير */
+  .export-mode, .export-mode * {
+    all: unset; /* تصفير كافة الخصائص لضمان عدم وجود oklab */
+    display: revert;
+    box-sizing: border-box;
+    direction: rtl;
+    font-family: "Cairo", sans-serif;
+    background-color: #ffffff;
+    color: #000000;
+    box-shadow: none !important;
+    text-shadow: none !important;
+    filter: none !important;
+    backdrop-filter: none !important;
   }
 }
 
 .glass-card {
-  @apply bg-white/80 backdrop-blur-md border border-white/20 shadow-sm;
+  background-color: rgba(255, 255, 255, 0.8);
+  border: 1px solid rgba(255, 255, 255, 0.2);
 }
-

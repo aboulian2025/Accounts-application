@@ -2,19 +2,40 @@
 <img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
 </div>
 
-# Run and deploy your AI Studio app
+# تطبيق إدارة الذمم (نسخة الموبايل) 📱
 
-This contains everything you need to run your app locally.
+تطبيق لإدارة الديون والعملاء يعمل مباشرة باستخدام **Capacitor** و **SQLite** على جهاز المستخدم.
 
-View your app in AI Studio: https://ai.studio/apps/bdf57c53-d7f0-4d05-8bb0-07b8e26716a3
+## الميزات الجديدة:
+- **بدون سيرفر (Serverless):** البيانات تُخزن مباشرة على الهاتف.
+- **العمل بدون إنترنت (Offline-first):** لا يحتاج لاتصال دائم.
+- **أداء أسرع:** اتصال مباشر بقاعدة البيانات من الواجهة.
 
-## Run Locally
+## التشغيل المحلي:
 
-**Prerequisites:**  Node.js
+**المتطلبات:** Node.js
 
+1. تثبيت المكتبات:
+   ```bash
+   npm install
+   ```
+2. تشغيل خادم التطوير (Vite):
+   ```bash
+   npm run dev
+   ```
+   سيفتح التطبيق على: `http://localhost:5173/`
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+## بناء نسخة الموبايل (Capacitor):
+
+1. بناء مشروع الويب:
+   ```bash
+   npm run build
+   ```
+2. مزامنة الملفات مع Android/iOS:
+   ```bash
+   npx cap sync
+   ```
+3. فتح المشروع في Android Studio:
+   ```bash
+   npx cap open android
+   ```

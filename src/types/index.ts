@@ -24,6 +24,26 @@ export interface Stats {
   overdue_count: number;
 }
 
+export interface InvoiceItem {
+  id?: number;
+  invoice_id?: number;
+  name: string;
+  quantity: number;
+  price: number;
+  total: number;
+}
+
+export interface Invoice {
+  id: number;
+  customer_name: string;
+  date: string;
+  total_amount: number;
+  notes?: string;
+  terms?: string;
+  created_at: string;
+  items?: InvoiceItem[];
+}
+
 export interface AppSettings {
   business_name: string;
   business_name_en: string;

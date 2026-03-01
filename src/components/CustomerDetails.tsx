@@ -6,25 +6,23 @@ import {
   MessageSquare, 
   FileText, 
   Plus, 
-  Trash2, 
-  ArrowUpRight, 
-  ArrowDownLeft,
-  Calendar,
-  MoreVertical,
   Share2,
   Edit,
+  Trash2,
+  Check,
+  X,
   MapPin,
   Building
 } from 'lucide-react';
 import { api } from '../lib/api';
 import { Customer, Transaction, AppSettings } from '../types';
 import { format } from 'date-fns';
-import { ar } from 'date-fns/locale';
 import { toast } from 'react-hot-toast';
 import jsPDF from 'jspdf';
-import autoTable from 'jspdf-autotable';
-
-import { toPng } from 'html-to-image';
+import html2canvas from 'html2canvas';
+import { Filesystem, Directory } from '@capacitor/filesystem';
+import { Share } from '@capacitor/share';
+import { Capacitor } from '@capacitor/core';
 
 interface CustomerDetailsProps {
   customerId: number;
@@ -41,17 +39,12 @@ export default function CustomerDetails({ customerId, onBack, onAddTransaction, 
   const [isEditingCustomer, setIsEditingCustomer] = useState(false);
   const [editForm, setEditForm] = useState({ name: '', phone: '' });
   const [isExporting, setIsExporting] = useState(false);
-  const statementRef = React.useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     loadData();
   }, [customerId]);
 
-  const isLoadingData = React.useRef(false);
-
   const loadData = async () => {
-    if (isLoadingData.current) return;
-    isLoadingData.current = true;
     try {
       const [customers, txs] = await Promise.all([
         api.getCustomers(),
@@ -62,27 +55,11 @@ export default function CustomerDetails({ customerId, onBack, onAddTransaction, 
         setCustomer(found);
         setEditForm({ name: found.name, phone: found.phone || '' });
       }
-      // Ensure transactions are sorted by ID ASC (oldest to newest) for balance calculation
       setTransactions(txs.sort((a, b) => a.id - b.id));
     } catch (error) {
       console.error(error);
-      if (error instanceof Error && error.message.includes('Rate exceeded')) {
-        toast.error('تم تجاوز حد الطلبات، يرجى الانتظار قليلاً');
-      }
     } finally {
       setLoading(false);
-      isLoadingData.current = false;
-    }
-  };
-
-  const handleDeleteTransaction = async (id: number) => {
-    if (!confirm('هل أنت متأكد من حذف هذه العملية؟')) return;
-    try {
-      await api.deleteTransaction(id);
-      toast.success('تم حذف العملية');
-      loadData();
-    } catch (error) {
-      toast.error('فشل حذف العملية');
     }
   };
 
@@ -92,388 +69,408 @@ export default function CustomerDetails({ customerId, onBack, onAddTransaction, 
       return;
     }
     try {
-      await api.updateCustomer(customerId, { ...editForm });
+      await api.updateCustomer(customerId, editForm);
       toast.success('تم تحديث بيانات العميل');
       setIsEditingCustomer(false);
       loadData();
     } catch (error) {
-      toast.error('فشل تحديث البيانات');
+      toast.error('فشل التحديث');
     }
   };
 
-  const sendReminder = () => {
+  const handleDeleteCustomer = async () => {
+    const confirmDelete = window.confirm(`هل أنت متأكد من حذف العميل "${customer?.name}" وجميع عملياته نهائياً؟`);
+    if (!confirmDelete) return;
+
+    try {
+      await api.deleteCustomer(customerId);
+      toast.success('تم حذف العميل بنجاح');
+      onBack();
+    } catch (error) {
+      toast.error('فشل عملية الحذف');
+    }
+  };
+
+  const sendWhatsAppReminder = () => {
     if (!customer?.phone) {
       toast.error('لا يوجد رقم هاتف لهذا العميل');
       return;
     }
-    const amount = Math.abs(customer.balance).toLocaleString();
-    const currency = settings?.currency || 'د.أ';
-    const message = settings?.reminder_template
-      .replace('{amount}', amount)
-      .replace('{currency}', currency) || 
-      `السلام عليكم، نود تذكيركم بأن الرصيد المستحق عليكم هو ${amount} ${currency}. يرجى السداد في أقرب وقت ممكن. شاكرين تعاونكم.`;
-    
-    const whatsappUrl = `https://wa.me/${customer.phone.replace(/\D/g, '')}?text=${encodeURIComponent(message)}`;
+
+    const amount = Math.abs(finalBalance).toLocaleString('en-US');
+    const currency = customer?.currency || settings?.currency || 'د.أ';
+
+    let message = `السلام عليكم أخ ${customer.name}، نود تذكيركم بأن الرصيد المستحق عليكم هو ${amount} ${currency}. يرجى السداد في أقرب وقت. شاكرين تعاونكم.`;
+
+    if (settings?.reminder_template) {
+      message = settings.reminder_template
+        .replace('{amount}', amount)
+        .replace('{currency}', currency);
+    }
+
+    const cleanPhone = customer.phone.replace(/\D/g, '');
+    const whatsappUrl = `https://wa.me/${cleanPhone}?text=${encodeURIComponent(message)}`;
     window.open(whatsappUrl, '_blank');
   };
 
-  const generatePDF = async () => {
-    if (!customer || !settings || !statementRef.current) return;
-    
-    // Workaround for Arabic support in PDF: 
-    // Capture the ledger as an image and insert it into the PDF
+  const saveAndShareFile = async (base64Data: string, fileName: string) => {
     try {
-      toast.loading('جاري إنشاء ملف PDF...', { id: 'pdf-gen' });
-      const dataUrl = await toPng(statementRef.current, { 
-        cacheBust: true,
-        backgroundColor: '#ffffff',
-        pixelRatio: 2
+      if (!Capacitor.isNativePlatform()) {
+        const link = document.createElement('a');
+        link.download = fileName; link.href = base64Data; link.click();
+        return;
+      }
+      const base64Content = base64Data.includes('base64,') ? base64Data.split('base64,')[1] : base64Data;
+      const result = await Filesystem.writeFile({
+        path: fileName,
+        data: base64Content,
+        directory: Directory.Cache
       });
-      
-      const doc = new jsPDF({ orientation: 'p', unit: 'mm', format: 'a4' });
-      const imgProps = doc.getImageProperties(dataUrl);
-      const pdfWidth = doc.internal.pageSize.getWidth();
-      const pdfHeight = (imgProps.height * pdfWidth) / imgProps.width;
-      
-      doc.addImage(dataUrl, 'PNG', 0, 0, pdfWidth, pdfHeight);
-      doc.save(`statement_${customer.name}.pdf`);
-      toast.success('تم إنشاء ملف PDF بنجاح', { id: 'pdf-gen' });
-    } catch (err) {
-      console.error(err);
-      toast.error('فشل إنشاء ملف PDF', { id: 'pdf-gen' });
+      await Share.share({ title: fileName, url: result.uri });
+    } catch (error) {
+      console.error('Save/Share Error:', error);
     }
   };
 
-  const generatePNG = async () => {
-    if (!statementRef.current || !customer) return;
+  const generateExport = async (type: 'pdf' | 'png') => {
+    if (!customer) return;
+    const toastId = toast.loading(`جاري تصدير كشف الحساب...`);
+    setIsExporting(true);
+
     try {
-      toast.loading('جاري معالجة آخر 50 عملية...', { id: 'png-gen' });
-      
-      // Toggle export mode to filter transactions
-      setIsExporting(true);
-      
-      // Wait for re-render
-      await new Promise(resolve => setTimeout(resolve, 100));
+      const totalDebitVal = transactions.filter(t => t.type === 'debit').reduce((sum, t) => sum + t.amount, 0);
+      const totalCreditVal = transactions.filter(t => t.type === 'credit').reduce((sum, t) => sum + t.amount, 0);
+      const balanceVal = totalDebitVal - totalCreditVal;
+      const currentCurrency = customer.currency || settings?.currency || 'د.أ';
 
-      // Ensure all images are loaded before capture
-      const images = statementRef.current.getElementsByTagName('img');
-      await Promise.all(Array.from(images).map((img: HTMLImageElement) => {
-        if (img.complete) return Promise.resolve();
-        return new Promise(resolve => { img.onload = resolve; img.onerror = resolve; });
-      }));
+      const iframe = document.createElement('iframe');
+      iframe.style.position = 'fixed';
+      iframe.style.left = '-9999px';
+      iframe.style.width = '210mm';
+      document.body.appendChild(iframe);
 
-      const dataUrl = await toPng(statementRef.current, { 
-        cacheBust: true,
+      const doc = iframe.contentDocument || iframe.contentWindow?.document;
+      if (!doc) throw new Error("Iframe creation failed");
+
+      const htmlContent = `
+        <html dir="rtl">
+          <head>
+            <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;700;900&display=swap" rel="stylesheet">
+            <style>
+              body { font-family: 'Cairo', sans-serif; background: white; padding: 0; color: #1e293b; margin: 0; width: 210mm; }
+              .container { width: 100%; border: none; overflow: hidden; position: relative; }
+              .header { display: flex; justify-content: space-between; align-items: start; border-bottom: 5px solid #4f46e5; padding: 30px; background: #f8fafc; }
+              .biz-info h2 { margin: 0; font-size: 20px; font-weight: 900; color: #1e293b; }
+              .biz-info p { margin: 4px 0; font-size: 12px; color: #64748b; font-weight: bold; }
+              .logo-area { text-align: center; display: flex; flex-direction: column; align-items: center; gap: 10px; flex: 1; }
+              .logo { width: 80px; height: 80px; border-radius: 15px; object-fit: cover; border: 3px solid white; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }
+              .statement-title { background: #e11d48; color: white; padding: 5px 30px; border-radius: 6px; font-weight: 900; font-size: 16px; display: inline-block; }
+              .client-bar { display: flex; justify-content: space-between; padding: 30px; background: white; border-bottom: 2px solid #f1f5f9; }
+              .client-info h3 { margin: 0; font-size: 24px; font-weight: 900; color: #0f172a; }
+              .date-info { text-align: left; color: #64748b; font-weight: bold; font-size: 16px; }
+              table { width: 100%; border-collapse: collapse; }
+              th { background: #334155; color: white; padding: 15px; text-align: right; font-size: 14px; font-weight: 900; border: 1px solid #1e293b; }
+              td { padding: 12px 15px; border: 1px solid #cbd5e1; font-size: 15px; font-weight: 700; color: #334155; }
+              .num { font-family: 'Arial', sans-serif; }
+              .footer { padding: 40px; background: #f8fafc; border-top: 5px solid #4f46e5; margin-top: 20px; }
+              .totals-table { width: 100%; display: flex; justify-content: space-between; align-items: center; }
+              .total-item { text-align: center; flex: 1; }
+              .total-label { font-size: 15px; color: #64748b; font-weight: 900; margin-bottom: 10px; }
+              .total-val { font-size: 26px; font-weight: 900; }
+              .balance-card { background: white; padding: 20px; border: 4px solid #4f46e5; border-radius: 15px; color: #4f46e5; }
+            </style>
+          </head>
+          <body>
+            <div class="container" id="capture-area">
+              <div class="header">
+                <div class="biz-info" style="width: 30%;">
+                  <h2>${settings?.business_name || 'دفتر الحسابات'}</h2>
+                  <p>${settings?.business_address || ''}</p>
+                  <p class="num">${settings?.my_phone || ''}</p>
+                </div>
+                <div class="logo-area" style="width: 40%;">
+                  ${settings?.business_logo ? `<img src="${settings.business_logo}" class="logo">` : '<div style="width:70px;height:70px;background:#e2e8f0;border-radius:12px;"></div>'}
+                  <div class="statement-title">كشف حساب</div>
+                </div>
+                <div class="biz-info" style="text-align: left; width: 30%;">
+                  <h2>${settings?.business_name_en || ''}</h2>
+                  <p>${settings?.business_address_en || ''}</p>
+                </div>
+              </div>
+              <div class="client-bar">
+                <div class="client-info">
+                  <p style="margin:0 0 8px 0; font-size:14px; color:#4f46e5; font-weight:900;">إلى السيد / المكرم:</p>
+                  <h3>${customer.name}</h3>
+                  <p class="num" style="margin:8px 0 0 0; font-size: 16px;">${customer.phone || ''}</p>
+                </div>
+                <div class="date-info">
+                  <p>تاريخ الكشف</p>
+                  <strong class="num" style="color:#1e293b; font-size:20px;">${format(new Date(), 'dd/MM/yyyy')}</strong>
+                </div>
+              </div>
+              <table>
+                <thead>
+                  <tr>
+                    <th style="width: 150px; text-align:center;">التاريخ</th>
+                    <th>البيان / الملاحظات</th>
+                    <th style="width: 120px; text-align:center;">مدين (+)</th>
+                    <th style="width: 120px; text-align:center;">دائن (-)</th>
+                    <th style="width: 150px; text-align:center;">الرصيد</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${(() => {
+                    let running = 0;
+                    return transactions.map((tx, i) => {
+                      running += tx.type === 'debit' ? tx.amount : -tx.amount;
+                      return `
+                        <tr style="background: ${i % 2 === 0 ? '#ffffff' : '#f8fafc'}">
+                          <td class="num" style="color:#64748b; text-align:center;">${format(new Date(tx.date), 'dd/MM/yyyy')}</td>
+                          <td>${tx.note || '-'}</td>
+                          <td class="num" style="color:#059669; text-align:center;">${tx.type === 'debit' ? tx.amount.toLocaleString('en-US') : '-'}</td>
+                          <td class="num" style="color:#e11d48; text-align:center;">${tx.type === 'credit' ? tx.amount.toLocaleString('en-US') : '-'}</td>
+                          <td class="num" style="font-weight:900; background:#f1f5f9; text-align:center;">${running.toLocaleString('en-US')}</td>
+                        </tr>
+                      `;
+                    }).join('');
+                  })()}
+                </tbody>
+              </table>
+              <div class="footer">
+                <div class="totals-table">
+                  <div class="total-item">
+                    <div class="total-label">إجمالي المطلوب</div>
+                    <div class="total-val num" style="color:#059669;">${totalDebitVal.toLocaleString('en-US')}</div>
+                  </div>
+                  <div class="total-item" style="border-right: 2px solid #e2e8f0; border-left: 2px solid #e2e8f0; margin: 0 30px; padding: 0 30px;">
+                    <div class="total-label">إجمالي المدفوع</div>
+                    <div class="total-val num" style="color:#e11d48;">${totalCreditVal.toLocaleString('en-US')}</div>
+                  </div>
+                  <div class="total-item balance-card">
+                    <div class="total-label" style="color:#4f46e5;">الرصيد المتبقي</div>
+                    <div class="total-val num">${Math.abs(balanceVal).toLocaleString('en-US')} <span style="font-size:14px;">${currentCurrency}</span></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </body>
+        </html>
+      `;
+
+      doc.open(); doc.write(htmlContent); doc.close();
+      await new Promise(r => setTimeout(r, 2000));
+
+      const captureArea = doc.getElementById('capture-area');
+      if (!captureArea) throw new Error("Capture area not found");
+
+      // ✅ استخدام إعدادات ذكية لمنع الـ Crash ودعم الصفحات المتعددة
+      const canvas = await html2canvas(captureArea, {
+        scale: 1.5,
+        useCORS: true,
         backgroundColor: '#ffffff',
-        pixelRatio: 3.111, // Targets ~1400px width (450 * 3.111)
-        skipFonts: false,
-        style: {
-          padding: '15px',
-          borderRadius: '0',
-          margin: '0',
-          fontFamily: 'Cairo, sans-serif'
+        logging: false
+      });
+
+      document.body.removeChild(iframe);
+
+      if (type === 'pdf') {
+        const imgData = canvas.toDataURL('image/jpeg', 0.8);
+        const pdf = new jsPDF('p', 'mm', 'a4');
+        const pdfWidth = pdf.internal.pageSize.getWidth();
+        const pdfHeight = pdf.internal.pageSize.getHeight();
+        const imgWidth = pdfWidth;
+        const imgHeight = (canvas.height * pdfWidth) / canvas.width;
+
+        let heightLeft = imgHeight;
+        let position = 0;
+
+        // الصفحة الأولى
+        pdf.addImage(imgData, 'JPEG', 0, position, imgWidth, imgHeight, undefined, 'FAST');
+        heightLeft -= pdfHeight;
+
+        // إضافة صفحات إضافية إذا لزم الأمر
+        while (heightLeft > 0) {
+          position = heightLeft - imgHeight;
+          pdf.addPage();
+          pdf.addImage(imgData, 'JPEG', 0, position, imgWidth, imgHeight, undefined, 'FAST');
+          heightLeft -= pdfHeight;
         }
-      });
-      
-      const link = document.createElement('a');
-      link.download = `كشف_آخر_50_عملية_${customer.name}.png`;
-      link.href = dataUrl;
-      link.click();
-      
+
+        const pdfBase64 = pdf.output('datauristring');
+        await saveAndShareFile(pdfBase64, `كشف_حساب_${customer.name}.pdf`);
+      } else {
+        const dataUrl = canvas.toDataURL('image/png', 1.0);
+        await saveAndShareFile(dataUrl, `كشف_حساب_${customer.name}.png`);
+      }
+
+      toast.success('تم التصدير بنجاح', { id: toastId });
+    } catch (error) {
+      console.error(error);
+      toast.error('حدث خطأ أثناء التصدير', { id: toastId });
+    } finally {
       setIsExporting(false);
-      toast.success('تم تصدير آخر 50 عملية بنجاح', { id: 'png-gen' });
-    } catch (err) {
-      console.error('PNG Export Error:', err);
-      setIsExporting(false);
-      toast.error('فشل تصدير الصورة', { id: 'png-gen' });
     }
   };
 
-  if (loading) return <div className="text-center py-20">جاري التحميل...</div>;
-  if (!customer) return <div className="text-center py-20">العميل غير موجود</div>;
+  if (loading) return <div className="text-center py-20 text-slate-500 font-bold">جاري تحميل البيانات...</div>;
+  if (!customer) return <div className="text-center py-20 text-rose-500 font-bold">العميل غير موجود</div>;
 
   const totalDebit = transactions.filter(t => t.type === 'debit').reduce((sum, t) => sum + t.amount, 0);
   const totalCredit = transactions.filter(t => t.type === 'credit').reduce((sum, t) => sum + t.amount, 0);
-  const totalTransactions = transactions.length;
   const finalBalance = totalDebit - totalCredit;
 
   return (
-    <motion.div 
-      initial={{ opacity: 0, x: 20 }}
-      animate={{ opacity: 1, x: 0 }}
-      exit={{ opacity: 0, x: -20 }}
-      className="space-y-4 text-sm"
-    >
-      {/* Header Info */}
-      <div className="flex items-center gap-4 mb-1">
-        <button onClick={onBack} className="p-2 hover:bg-slate-100 rounded-full transition-colors">
-          <ChevronRight size={20} />
+    <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="space-y-4 pb-12">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <button onClick={onBack} className="p-2 hover:bg-slate-100 rounded-full transition-all">
+            <ChevronRight size={24} className="text-slate-800" />
+          </button>
+          <h2 className="text-xl font-black text-slate-800 tracking-tight">تفاصيل الحساب</h2>
+        </div>
+        <button
+          onClick={handleDeleteCustomer}
+          className="p-2.5 bg-rose-50 text-rose-600 rounded-2xl hover:bg-rose-100 transition-colors"
+          title="حذف العميل"
+        >
+          <Trash2 size={20} />
         </button>
-        <h2 className="text-base font-bold text-slate-800">تفاصيل العميل</h2>
       </div>
 
-      <div className="bg-white p-5 rounded-3xl shadow-sm border border-slate-100">
-        <div className="flex justify-between items-start mb-4">
-          <div className="flex-1">
+      <div className="bg-white p-6 rounded-[2.5rem] shadow-sm border border-slate-100">
+        <div className="flex justify-between items-start mb-6">
+          <div className="flex-1 mr-2">
             {isEditingCustomer ? (
-              <div className="space-y-3 mb-4">
-                <input 
+              <div className="space-y-3">
+                <input
                   type="text"
                   value={editForm.name}
-                  onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
+                  onChange={(e) => setEditForm({...editForm, name: e.target.value})}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl py-2 px-4 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 font-bold"
                   placeholder="اسم العميل"
                 />
-                <input 
+                <input
                   type="text"
                   value={editForm.phone}
-                  onChange={(e) => setEditForm({ ...editForm, phone: e.target.value })}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
+                  onChange={(e) => setEditForm({...editForm, phone: e.target.value})}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl py-2 px-4 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 font-sans"
                   placeholder="رقم الهاتف"
                 />
                 <div className="flex gap-2">
-                  <button onClick={handleUpdateCustomer} className="flex-1 bg-indigo-600 text-white py-2 rounded-xl text-xs font-bold">حفظ</button>
-                  <button onClick={() => setIsEditingCustomer(false)} className="flex-1 bg-slate-100 text-slate-600 py-2 rounded-xl text-xs font-bold">إلغاء</button>
+                  <button onClick={handleUpdateCustomer} className="flex-1 bg-indigo-600 text-white py-2 rounded-xl text-xs font-black flex items-center justify-center gap-1">
+                    <Check size={14} /> حفظ
+                  </button>
+                  <button onClick={() => setIsEditingCustomer(false)} className="flex-1 bg-slate-100 text-slate-600 py-2 rounded-xl text-xs font-black flex items-center justify-center gap-1">
+                    <X size={14} /> إلغاء
+                  </button>
                 </div>
               </div>
             ) : (
               <>
-                <div className="flex items-center gap-2 mb-1">
-                  <h3 className="text-xl font-bold text-slate-800">{customer.name}</h3>
-                  <button onClick={() => setIsEditingCustomer(true)} className="p-1.5 text-slate-400 hover:text-indigo-600 transition-colors">
-                    <Edit size={14} />
+                <div className="flex items-center gap-2">
+                  <h3 className="text-2xl font-black text-slate-900">{customer.name}</h3>
+                  <button
+                    onClick={() => setIsEditingCustomer(true)}
+                    className="p-1 text-slate-400 hover:text-indigo-600 transition-colors"
+                  >
+                    <Edit size={18} />
                   </button>
                 </div>
-                <p className="text-slate-500 text-xs flex items-center gap-1">
-                  <Phone size={12} />
-                  {customer.phone || 'لا يوجد رقم'}
-                </p>
+                <div className="flex items-center gap-3 mt-1.5">
+                  <p className="text-slate-500 font-black flex items-center gap-2">
+                    <Phone size={16} className="text-indigo-600" />
+                    <span className="font-sans tracking-wider">{customer.phone || 'لا يوجد رقم'}</span>
+                  </p>
+                  <p className="text-[10px] bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded-lg font-black border border-indigo-100">
+                    {customer.currency || settings?.currency}
+                  </p>
+                </div>
               </>
             )}
           </div>
+          {!isEditingCustomer && (
+            <button onClick={onAddTransaction} className="bg-indigo-600 text-white p-4 rounded-3xl shadow-xl shadow-indigo-100 active:scale-95 transition-transform">
+              <Plus size={28} />
+            </button>
+          )}
         </div>
 
-        <div className="grid grid-cols-3 gap-2 mb-4">
-          <div className="bg-emerald-50 p-2 rounded-2xl text-center">
-            <p className="text-[8px] font-medium text-emerald-600 uppercase mb-0.5">إجمالي المبلغ</p>
-            <p className="text-[11px] font-bold text-emerald-700">{totalDebit.toLocaleString()} <span className="text-[7px] font-normal">{settings?.currency || 'د.أ'}</span></p>
+        <div className="grid grid-cols-3 gap-3 mb-6">
+          <div className="bg-emerald-50/50 p-4 rounded-[1.5rem] border border-emerald-100 text-center">
+            <p className="text-[10px] font-black text-emerald-600 uppercase tracking-widest mb-1.5">مدين (+)</p>
+            <p className="text-base font-black text-emerald-700 font-sans">{totalDebit.toLocaleString('en-US')}</p>
           </div>
-          <div className="bg-rose-50 p-2 rounded-2xl text-center">
-            <p className="text-[8px] font-medium text-rose-600 uppercase mb-0.5">المبلغ المدفوع</p>
-            <p className="text-[11px] font-bold text-rose-700">{totalCredit.toLocaleString()} <span className="text-[7px] font-normal">{settings?.currency || 'د.أ'}</span></p>
+          <div className="bg-rose-50/50 p-4 rounded-[1.5rem] border border-rose-100 text-center">
+            <p className="text-[10px] font-black text-rose-600 uppercase tracking-widest mb-1.5">دائن (-)</p>
+            <p className="text-base font-black text-rose-700 font-sans">{totalCredit.toLocaleString('en-US')}</p>
           </div>
-          <div className={`p-2 rounded-2xl text-center ${finalBalance >= 0 ? 'bg-indigo-50 text-indigo-700' : 'bg-amber-50 text-amber-700'}`}>
-            <p className="text-[8px] font-medium uppercase mb-0.5">المبلغ المتبقي</p>
-            <p className="text-[11px] font-bold">{Math.abs(finalBalance).toLocaleString()} <span className="text-[7px] font-normal">{settings?.currency || 'د.أ'}</span></p>
+          <div className="bg-indigo-50/50 p-4 rounded-[1.5rem] border border-indigo-100 text-center">
+            <p className="text-[10px] font-black text-indigo-600 uppercase tracking-widest mb-1.5">المتبقي</p>
+            <p className="text-base font-black text-indigo-700 font-sans">{Math.abs(finalBalance).toLocaleString('en-US')}</p>
           </div>
         </div>
 
-          <div className="grid grid-cols-4 gap-2">
-          <button 
-            onClick={sendReminder}
-            className="flex flex-col items-center gap-2 p-3 rounded-2xl bg-slate-50 text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 transition-all"
-          >
+        <div className="grid grid-cols-3 gap-3">
+          <button onClick={sendWhatsAppReminder} className="flex flex-col items-center gap-1.5 p-3 rounded-2xl bg-indigo-50 text-indigo-600 border border-indigo-100 hover:bg-indigo-100 transition-all">
             <MessageSquare size={20} />
-            <span className="text-[10px] font-bold">تذكير</span>
+            <span className="text-[10px] font-bold">تذكير واتساب</span>
           </button>
-          <button 
-            onClick={generatePDF}
-            className="flex flex-col items-center gap-2 p-3 rounded-2xl bg-slate-50 text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 transition-all"
-          >
-            <FileText size={20} />
-            <span className="text-[10px] font-bold">PDF</span>
+          <button onClick={() => generateExport('pdf')} className="flex flex-col items-center gap-1.5 p-3 rounded-2xl bg-slate-50 text-slate-700 border border-slate-100 hover:bg-slate-100 transition-all">
+            <FileText size={20} className="text-slate-600" />
+            <span className="text-[10px] font-bold">تصدير PDF</span>
           </button>
-          <button 
-            onClick={generatePNG}
-            className="flex flex-col items-center gap-2 p-3 rounded-2xl bg-slate-50 text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 transition-all"
-          >
-            <Share2 size={20} />
-            <span className="text-[10px] font-bold">صورة</span>
-          </button>
-          <button 
-            onClick={onAddTransaction}
-            className="flex flex-col items-center gap-2 p-3 rounded-2xl bg-indigo-600 text-white hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100"
-          >
-            <Plus size={20} />
-            <span className="text-[10px] font-bold">عملية</span>
+          <button onClick={() => generateExport('png')} className="flex flex-col items-center gap-1.5 p-3 rounded-2xl bg-slate-50 text-slate-700 border border-slate-100 hover:bg-slate-100 transition-all">
+            <Share2 size={20} className="text-slate-600" />
+            <span className="text-[10px] font-bold">تصدير صورة</span>
           </button>
         </div>
       </div>
 
-      {/* Ledger Section */}
-      <div className="bg-white rounded-3xl border border-slate-100 overflow-hidden shadow-sm" ref={statementRef} style={{ width: '100%', maxWidth: '450px', margin: '0 auto' }}>
-        {/* Store Header in View - Redesigned */}
-        <div className="p-4 border-b border-slate-100 bg-white">
-          <div className="flex items-center justify-between gap-2">
-            {/* Right Side: Arabic Info */}
-            <div className="flex-1 text-right space-y-0.5">
-              <h4 className="font-bold text-slate-800 text-[10px]">{settings?.business_name}</h4>
-              <p className="text-[7px] text-slate-500 flex items-center justify-end gap-1">
-                {settings?.business_address}
-                <MapPin size={7} />
-              </p>
-              <p className="text-[7px] text-slate-500 flex items-center justify-end gap-1">
-                {settings?.my_phone}
-                <Phone size={7} />
-              </p>
-            </div>
-
-            {/* Center: Logo */}
-            <div className="flex flex-col items-center justify-center px-2">
-              {settings?.business_logo ? (
-                <img 
-                  src={settings.business_logo} 
-                  alt="Logo" 
-                  className="w-14 h-14 rounded-2xl object-cover border-2 border-slate-50 shadow-sm mb-1"
-                  referrerPolicy="no-referrer"
-                />
-              ) : (
-                <div className="w-14 h-14 bg-slate-50 rounded-2xl flex items-center justify-center text-slate-300 border-2 border-slate-50 mb-1">
-                  <Building size={20} />
-                </div>
-              )}
-              <p className="text-[8px] font-bold text-indigo-600 uppercase tracking-widest">كشف حساب</p>
-            </div>
-
-            {/* Left Side: English Info */}
-            <div className="flex-1 text-left space-y-0.5">
-              <h4 className="font-bold text-slate-800 text-[10px]">{settings?.business_name_en}</h4>
-              <p className="text-[7px] text-slate-500 flex items-center justify-start gap-1">
-                <MapPin size={7} />
-                {settings?.business_address_en}
-              </p>
-              <p className="text-[7px] text-slate-500 flex items-center justify-start gap-1">
-                <Phone size={7} />
-                {settings?.my_phone}
-              </p>
-            </div>
-          </div>
-          
-          <div className="mt-3 flex justify-between items-center px-2 border-t border-slate-50 pt-2">
-            <div className="text-right">
-              <p className="text-[9px] font-bold text-slate-700">{customer.name}</p>
-              <p className="text-[8px] text-slate-400">{customer.phone}</p>
-            </div>
-            <div className="text-left">
-              <p className="text-[8px] text-slate-400">{format(new Date(), 'dd/MM/yyyy')}</p>
-            </div>
-          </div>
+      <div className="bg-white rounded-[2rem] border border-slate-200 overflow-hidden shadow-sm">
+        <div className="bg-slate-800 p-4 flex justify-between items-center">
+          <h4 className="text-white font-black text-sm">سجل العمليات المباشر</h4>
+          <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">تنسيق تلقائي</span>
         </div>
 
-        {/* Ledger Table */}
-        <div className="px-4 py-2 bg-slate-50 border-b border-slate-100 flex justify-between items-center">
-          <p className="text-[9px] text-slate-400 font-bold uppercase">سجل العمليات {isExporting && '(آخر 50)'}</p>
-          <p className="text-[8px] text-indigo-400 italic">اضغط على العملية للتعديل</p>
-        </div>
         <div className="overflow-x-auto">
-          <table className="w-full text-right text-[10px] border-collapse">
+          <table className="w-full text-right text-xs">
             <thead>
-              <tr className="bg-slate-100 text-slate-600 uppercase tracking-wider border-y border-slate-200">
-                <th className="px-2 py-2 font-bold border-l border-slate-200/50">التاريخ</th>
-                <th className="px-2 py-2 font-bold border-l border-slate-200/50">الملاحظات</th>
-                <th className="px-2 py-2 font-bold border-l border-slate-200/50">مدين</th>
-                <th className="px-2 py-2 font-bold border-l border-slate-200/50">دائن</th>
-                <th className="px-2 py-2 font-bold">الرصيد</th>
+              <tr className="bg-slate-100 text-slate-600 border-b border-slate-200">
+                <th className="p-4 font-black border-l border-slate-200">التاريخ</th>
+                <th className="p-4 font-black border-l border-slate-200">البيان</th>
+                <th className="p-4 font-black border-l border-slate-200 text-center">مدين (+)</th>
+                <th className="p-4 font-black border-l border-slate-200 text-center">دائن (-)</th>
+                <th className="p-4 font-black text-center">الرصيد</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-200">
-              {transactions.length > 0 ? (
-                (() => {
-                  const txToDisplay = isExporting ? transactions.slice(-50) : transactions;
-                  const startIndex = transactions.length - txToDisplay.length;
-                  
-                  // Calculate opening balance for the transactions before the slice
-                  let openingBalance = 0;
-                  for (let i = 0; i < startIndex; i++) {
-                    const tx = transactions[i];
-                    if (tx.type === 'debit') openingBalance += tx.amount;
-                    else openingBalance -= tx.amount;
-                  }
-
-                  let runningBalance = openingBalance;
-                  
+            <tbody className="divide-y divide-slate-100">
+              {transactions.length > 0 ? (() => {
+                let balance = 0;
+                return transactions.map((tx, i) => {
+                  balance += tx.type === 'debit' ? tx.amount : -tx.amount;
                   return (
-                    <>
-                      {isExporting && startIndex > 0 && (
-                        <tr className="bg-slate-50/80 italic font-bold text-slate-500">
-                          <td colSpan={4} className="px-2 py-2 text-center border-l border-slate-100/50">رصيد سابق منقول</td>
-                          <td className="px-2 py-2 bg-slate-100/50">{openingBalance.toLocaleString()}</td>
-                        </tr>
-                      )}
-                      {txToDisplay.map((tx, index) => {
-                        if (tx.type === 'debit') runningBalance += tx.amount;
-                        else runningBalance -= tx.amount;
-                        
-                        return (
-                          <tr 
-                            key={tx.id} 
-                            onClick={() => onEditTransaction(tx)}
-                            className={`${index % 2 === 0 ? 'bg-white' : 'bg-slate-50/30'} hover:bg-indigo-50/30 transition-colors group cursor-pointer`}
-                          >
-                            <td className="px-2 py-1.5 text-[9px] text-slate-500 whitespace-nowrap border-l border-slate-100/50">
-                              {format(new Date(tx.date), 'dd/MM/yyyy')}
-                            </td>
-                            <td className="px-2 py-1.5 border-l border-slate-100/50">
-                              <p className="text-slate-700 font-medium leading-tight">{tx.note || '-'}</p>
-                            </td>
-                            <td className="px-2 py-1.5 text-emerald-600 font-bold border-l border-slate-100/50">
-                              {tx.type === 'debit' ? tx.amount.toLocaleString() : '-'}
-                            </td>
-                            <td className="px-2 py-1.5 text-rose-600 font-bold border-l border-slate-100/50">
-                              {tx.type === 'credit' ? tx.amount.toLocaleString() : '-'}
-                            </td>
-                            <td className="px-2 py-1.5 font-bold text-slate-900 bg-slate-50/50">
-                              {runningBalance.toLocaleString()}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </>
+                    <tr key={tx.id} onClick={() => onEditTransaction(tx)} className={`${i % 2 === 0 ? 'bg-white' : 'bg-slate-50/50'} active:bg-indigo-50 transition-colors cursor-pointer`}>
+                      <td className="p-4 font-bold text-slate-500 border-l border-slate-50 font-sans text-center">{format(new Date(tx.date), 'dd/MM/yyyy')}</td>
+                      <td className="p-4 font-black text-slate-800 border-l border-slate-50">{tx.note || '-'}</td>
+                      <td className="p-4 font-black text-emerald-600 text-center border-l border-slate-50 font-sans">{tx.type === 'debit' ? tx.amount.toLocaleString('en-US') : '-'}</td>
+                      <td className="p-4 font-black text-rose-600 text-center border-l border-slate-50 font-sans">{tx.type === 'credit' ? tx.amount.toLocaleString('en-US') : '-'}</td>
+                      <td className="p-4 font-black text-slate-900 text-center bg-slate-100/30 font-sans">{balance.toLocaleString('en-US')}</td>
+                    </tr>
                   );
-                })()
-              ) : (
-                <tr>
-                  <td colSpan={5} className="px-4 py-12 text-center text-slate-400 italic bg-white">لا يوجد عمليات مسجلة حالياً</td>
-                </tr>
+                });
+              })() : (
+                <tr><td colSpan={5} className="p-16 text-center text-slate-400 font-black">لا يوجد عمليات مسجلة حالياً</td></tr>
               )}
             </tbody>
           </table>
         </div>
 
-        {/* Statement Summary Box - Professional Ledger Style */}
-        <div className="px-6 py-5 bg-slate-50 border-t-2 border-slate-200">
-          <div className="flex justify-between items-center">
-            <div className="flex items-center gap-2">
-              <div className={`w-2 h-2 rounded-full ${finalBalance > 0 ? 'bg-rose-500 animate-pulse' : 'bg-emerald-500'}`}></div>
-              <p className="text-[9px] font-bold text-slate-500 uppercase tracking-tight">
-                الحالة: {finalBalance > 0 ? 'رصيد مستحق' : finalBalance < 0 ? 'رصيد دائن' : 'خالص'}
-              </p>
-            </div>
-            <div className="flex gap-8">
-              <div className="text-center px-4 border-r border-slate-200">
-                <p className="text-[7px] text-slate-400 uppercase tracking-wider mb-1">إجمالي مدين</p>
-                <p className="text-[11px] font-black text-emerald-600">{totalDebit.toLocaleString()}</p>
-              </div>
-              <div className="text-center px-4 border-r border-slate-200">
-                <p className="text-[7px] text-slate-400 uppercase tracking-wider mb-1">إجمالي دائن</p>
-                <p className="text-[11px] font-black text-rose-600">{totalCredit.toLocaleString()}</p>
-              </div>
-              <div className="text-left px-4">
-                <p className="text-[7px] text-slate-400 uppercase tracking-wider mb-1">الرصيد النهائي</p>
-                <p className={`text-[12px] font-black ${finalBalance >= 0 ? 'text-indigo-600' : 'text-emerald-600'}`}>
-                  {Math.abs(finalBalance).toLocaleString()} 
-                  <span className="text-[8px] font-normal mr-1">{settings?.currency || 'د.أ'}</span>
-                </p>
-              </div>
-            </div>
+        <div className="p-6 bg-slate-900 flex justify-between items-center">
+          <span className="text-slate-400 font-black text-xs uppercase tracking-widest">إجمالي الرصيد النهائي</span>
+          <div className="text-left">
+            <span className="text-xl font-black text-white font-sans mr-2">{Math.abs(finalBalance).toLocaleString('en-US')}</span>
+            <span className="text-[10px] text-indigo-400 font-black uppercase">{customer?.currency || settings?.currency}</span>
           </div>
-        </div>
-
-        {/* Copyright Footer */}
-        <div className="p-4 bg-slate-50 border-t border-slate-100 text-center">
-          <p className="text-[10px] text-slate-400 font-medium tracking-widest uppercase">
-            حقوق الملكية لهذا التطبيق - ameen assery
-          </p>
         </div>
       </div>
     </motion.div>

@@ -1,20 +1,33 @@
 import { db, auth } from './firebase';
 import { collection, doc, setDoc, getDocs, query, where } from 'firebase/firestore';
 import { api } from './api';
+import { getDB } from './db';
 import { toast } from 'react-hot-toast';
 
-// Simple XOR encryption for demo purposes (In production use a real library like crypto-js)
+// ✅ التشفير وفك التشفير مع دعم العربية
 const encrypt = (text: string, key: string) => {
-  return btoa(text.split('').map((char, i) => 
+  const utf8Text = encodeURIComponent(text).replace(/%([0-9A-F]{2})/g, (_, p1) =>
+    String.fromCharCode(parseInt(p1, 16))
+  );
+  const xorText = utf8Text.split('').map((char, i) =>
     String.fromCharCode(char.charCodeAt(0) ^ key.charCodeAt(i % key.length))
-  ).join(''));
+  ).join('');
+  return btoa(xorText);
 };
 
 const decrypt = (encoded: string, key: string) => {
-  const text = atob(encoded);
-  return text.split('').map((char, i) => 
-    String.fromCharCode(char.charCodeAt(0) ^ key.charCodeAt(i % key.length))
-  ).join('');
+  try {
+    const xorText = atob(encoded);
+    const utf8Text = xorText.split('').map((char, i) =>
+      String.fromCharCode(char.charCodeAt(0) ^ key.charCodeAt(i % key.length))
+    ).join('');
+    return decodeURIComponent(utf8Text.split('').map((c) =>
+      '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2)
+    ).join(''));
+  } catch (e) {
+    console.error('Decryption failed', e);
+    return '';
+  }
 };
 
 export const syncService = {
@@ -23,29 +36,41 @@ export const syncService = {
     if (!user) return;
 
     try {
+      // 1. جلب بيانات العملاء والعمليات
       const customers = await api.getCustomers();
-      const settings = await api.getSettings();
-      
-      // We'll sync all customers and their transactions
-      // For each customer, we'll get their transactions
-      const fullData = await Promise.all(customers.map(async (c) => {
+      const fullCustomers = await Promise.all(customers.map(async (c) => {
         const txs = await api.getTransactions(c.id);
         return { ...c, transactions: txs };
       }));
 
-      const dataToSync = {
+      // 2. جلب بيانات الفواتير والأصناف
+      const invoices = await api.getInvoices();
+      const fullInvoices = await Promise.all(invoices.map(async (inv) => {
+        const details = await api.getInvoiceDetails(inv.id);
+        return details;
+      }));
+
+      // 3. جلب الإعدادات
+      const settings = await api.getSettings();
+
+      const dataToStore = JSON.stringify({
+        customers: fullCustomers,
+        invoices: fullInvoices,
+        settings
+      });
+
+      const encryptedData = encrypt(dataToStore, user.uid);
+
+      await setDoc(doc(db, 'backups', user.uid), {
         userId: user.uid,
         updatedAt: new Date().toISOString(),
-        data: encrypt(JSON.stringify({ customers: fullData, settings }), user.uid)
-      };
+        data: encryptedData
+      });
 
-      await setDoc(doc(db, 'backups', user.uid), dataToSync);
-      
       await api.updateSettings({ last_sync: new Date().toLocaleString('ar-EG') });
-      toast.success('تمت المزامنة بنجاح');
+      console.log('✅ تم مزامنة كافة البيانات بما فيها الفواتير');
     } catch (error) {
-      console.error('Sync failed', error);
-      toast.error('فشلت المزامنة');
+      console.error('❌ فشل المزامنة الشاملة', error);
     }
   },
 
@@ -53,23 +78,81 @@ export const syncService = {
     const user = auth.currentUser;
     if (!user) return;
 
+    const toastId = toast.loading('جاري استعادة النسخة الاحتياطية الشاملة...');
+
     try {
-      const docSnap = await getDocs(query(collection(db, 'backups'), where('userId', '==', user.uid)));
-      if (docSnap.empty) {
-        toast.error('لا يوجد نسخة احتياطية سحابية');
+      const q = query(collection(db, 'backups'), where('userId', '==', user.uid));
+      const querySnapshot = await getDocs(q);
+
+      if (querySnapshot.empty) {
+        toast.error('لا توجد نسخة احتياطية سحابية لهذا الحساب', { id: toastId });
         return;
       }
 
-      const backup = docSnap.docs[0].data();
-      const decryptedData = JSON.parse(decrypt(backup.data, user.uid));
-      
-      // In a real app, we'd merge or overwrite local SQLite
-      // For this demo, we'll just log it
-      console.log('Restored data:', decryptedData);
-      toast.success('تمت استعادة البيانات بنجاح (راجع السجل)');
+      const backup = querySnapshot.docs[0].data();
+      const rawDecrypted = decrypt(backup.data, user.uid);
+      if (!rawDecrypted) throw new Error('فشل فك تشفير البيانات');
+
+      const restored = JSON.parse(rawDecrypted);
+      const { customers, invoices, settings } = restored;
+
+      const sqliteDB = getDB();
+      const setCommands: any[] = [];
+
+      // أوامر مسح كافة الجداول الحالية
+      setCommands.push({ statement: 'DELETE FROM transactions', values: [] });
+      setCommands.push({ statement: 'DELETE FROM customers', values: [] });
+      setCommands.push({ statement: 'DELETE FROM invoice_items', values: [] });
+      setCommands.push({ statement: 'DELETE FROM invoices', values: [] });
+
+      // استعادة العملاء والعمليات
+      if (customers && Array.isArray(customers)) {
+        customers.forEach((c: any) => {
+          setCommands.push({
+            statement: 'INSERT INTO customers (id, name, phone, notes, currency) VALUES (?, ?, ?, ?, ?)',
+            values: [c.id, c.name, c.phone || '', c.notes || '', c.currency || '']
+          });
+          if (c.transactions) {
+            c.transactions.forEach((tx: any) => {
+              setCommands.push({
+                statement: 'INSERT INTO transactions (id, customer_id, type, amount, note, date, due_date) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                values: [tx.id, c.id, tx.type, tx.amount, tx.note || '', tx.date, tx.due_date || null]
+              });
+            });
+          }
+        });
+      }
+
+      // استعادة الفواتير والأصناف
+      if (invoices && Array.isArray(invoices)) {
+        invoices.forEach((inv: any) => {
+          setCommands.push({
+            statement: 'INSERT INTO invoices (id, customer_name, date, total_amount, paid_amount, remaining_amount, currency, notes, terms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            values: [inv.id, inv.customer_name, inv.date, inv.total_amount, inv.paid_amount || 0, inv.remaining_amount || 0, inv.currency || '', inv.notes || '', inv.terms || '']
+          });
+          if (inv.items) {
+            inv.items.forEach((item: any) => {
+              setCommands.push({
+                statement: 'INSERT INTO invoice_items (invoice_id, name, quantity, price, total) VALUES (?, ?, ?, ?, ?)',
+                values: [inv.id, item.name, item.quantity, item.price, item.total]
+              });
+            });
+          }
+        });
+      }
+
+      await sqliteDB.executeSet(setCommands);
+
+      if (settings) {
+        await api.updateSettings(settings);
+      }
+
+      toast.success('تمت استعادة كافة البيانات والفواتير بنجاح!', { id: toastId });
+      setTimeout(() => { window.location.reload(); }, 2000);
+
     } catch (error) {
-      console.error('Restore failed', error);
-      toast.error('فشلت استعادة البيانات');
+      console.error('❌ فشل الاستعادة الشاملة:', error);
+      toast.error('فشل في استعادة البيانات', { id: toastId });
     }
   }
 };
