@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Accounts application</string>
+    <string name="title_activity_main">Accounts application</string>
+    <string name="package_name">com.accountsapplication.app</string>
+    <string name="custom_url_scheme">com.accountsapplication.app</string>
+</resources>
