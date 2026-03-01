@@ -27,7 +27,7 @@ import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
 // Capacitor Plugins
 import { App as CapacitorApp } from '@capacitor/app';
 
-const CURRENT_VERSION = "1.0.0";
+const CURRENT_VERSION = "2.1.0";
 const GITHUB_USERNAME = "aboulian2025";
 const REPO_NAME = "Accounts-application";
 
