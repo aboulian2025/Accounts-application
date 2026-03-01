@@ -5,7 +5,8 @@ import {
   ArrowLeftRight,
   Cloud,
   FileText,
-  LayoutDashboard
+  LayoutDashboard,
+  Download
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { api } from './lib/api';
@@ -25,6 +26,10 @@ import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
 
 // Capacitor Plugins
 import { App as CapacitorApp } from '@capacitor/app';
+
+const CURRENT_VERSION = "1.0.0";
+const GITHUB_USERNAME = "aboulian2025";
+const REPO_NAME = "Accounts-application";
 
 type View = 'dashboard' | 'customers' | 'customer-details' | 'add-transaction' | 'edit-transaction' | 'settings' | 'login' | 'invoices' | 'add-invoice';
 
@@ -56,7 +61,12 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  useEffect(() => { refreshData(); }, []);
+  useEffect(() => {
+    refreshData();
+    // فحص التحديثات بعد ثانيتين من تشغيل التطبيق لضمان استقرار الاتصال
+    const timer = setTimeout(() => checkForUpdates(), 2000);
+    return () => clearTimeout(timer);
+  }, []);
 
   const refreshData = async () => {
     try {
@@ -71,13 +81,47 @@ export default function App() {
     }
   };
 
+  const checkForUpdates = async () => {
+    try {
+      // ✅ استخدام jsDelivr لتجنب مشاكل الـ Cache والـ Raw URL
+      const url = `https://cdn.jsdelivr.net/gh/${GITHUB_USERNAME}/${REPO_NAME}@main/version.json`;
+      const response = await fetch(url);
+
+      if (!response.ok) throw new Error('Network response was not ok');
+
+      const data = await response.json();
+      console.log('Update Check - Online:', data.latestVersion, 'Current:', CURRENT_VERSION);
+
+      if (data.latestVersion !== CURRENT_VERSION) {
+        toast((t) => (
+          <div className="flex items-center gap-3">
+            <div className="flex-1">
+              <p className="text-sm font-bold">يتوفر إصدار جديد ({data.latestVersion})</p>
+              <p className="text-[10px] text-slate-500">انقر للتنزيل من GitHub</p>
+            </div>
+            <button
+              onClick={() => {
+                window.open(data.downloadUrl, '_blank');
+                toast.dismiss(t.id);
+              }}
+              className="bg-indigo-600 text-white p-2 rounded-lg shadow-lg active:scale-90 transition-transform"
+            >
+              <Download size={16} />
+            </button>
+          </div>
+        ), { duration: 15000, position: 'top-center' });
+      }
+    } catch (error) {
+      console.warn('Check update failed:', error);
+    }
+  };
+
   const autoSync = async () => {
     if (auth.currentUser) {
       try { await syncService.syncToCloud(); } catch (err) { }
     }
   };
 
-  // ✅ تعديل دالة التنقل لجلب تفاصيل الفاتورة كاملة
   const handleViewInvoice = async (invoice: Invoice) => {
     const toastId = toast.loading('جاري تحميل تفاصيل الفاتورة...');
     try {
@@ -121,7 +165,7 @@ export default function App() {
             </div>
           </div>
         </div>
-        <button onClick={() => navigateTo('settings')} className="p-2 text-slate-500 hover:bg-slate-100 rounded-full">
+        <button onClick={() => navigateTo('settings')} className="p-2 text-slate-500 hover:bg-slate-100 rounded-full transition-colors">
           <SettingsIcon size={22} />
         </button>
       </header>
@@ -142,7 +186,7 @@ export default function App() {
           {currentView === 'invoices' && (
             <InvoiceList
               onAddInvoice={() => navigateTo('add-invoice')}
-              onViewInvoice={handleViewInvoice} // استخدام الدالة الجديدة هنا
+              onViewInvoice={handleViewInvoice}
               settings={settings} onBack={() => navigateTo('dashboard')}
             />
           )}

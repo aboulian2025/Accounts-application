@@ -19,3 +19,16 @@ android/*.iml
 # Capacitor
 public/
 data.db
+
+# Android
+android/app/build/
+android/.gradle/
+android/local.properties
+android/captures/
+android/.externalNativeBuild/
+android/.cxx/
+android/*.iml
+.idea/
+# Capacitor
+public/
+data.db
